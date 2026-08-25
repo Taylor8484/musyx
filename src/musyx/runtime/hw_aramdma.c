@@ -442,7 +442,19 @@ static void InitStreamBuffers();
 
 void aramUploadData(void* mram, unsigned long aram, unsigned long len, unsigned long highPrio,
                     void (*callback)(size_t), unsigned long user) {
-  memcpy((u8*)ARGetStorageAddress() + aram, mram, len);
+  {
+    u8* base = (u8*)ARGetStorageAddress();
+    u32 size = ARGetSize();
+
+    /* Real hardware would simply refuse a transfer outside ARAM; here an
+     * unchecked copy would run off the emulated buffer. */
+    if (base == NULL || mram == NULL || aram > size || len > size - aram) {
+      MUSY_DEBUG("Refusing ARAM upload of %u bytes to 0x%X (ARAM is %u bytes)\n", (unsigned)len,
+                 (unsigned)aram, (unsigned)size);
+    } else {
+      memcpy(base + aram, mram, len);
+    }
+  }
 
   /* The Dolphin path reports completion from the ARQ callback with the caller's
    * user value; the transfer is already done here, so report it inline. */

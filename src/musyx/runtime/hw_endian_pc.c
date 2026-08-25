@@ -5,6 +5,7 @@
 #include "musyx/assert.h"
 #include "musyx/hardware.h"
 #include "musyx/sal.h"
+#include "musyx/seq.h"
 #include "musyx/synth.h"
 #include "musyx/synthdata.h"
 
@@ -51,8 +52,31 @@ static void SwapIDList(u16* ref) {
   }
 }
 
-/* A song group carries an FX table at normpageOff; sndFXStart() looks entries
- * up by id, so it has to be in host order before any effect can start. */
+/* Program tables: one entry per MIDI program, terminated by index 0xFF. */
+static void SwapPageTable(PAGE* page) {
+  if (page == NULL) {
+    return;
+  }
+  for (; page->index != 0xFF; ++page) {
+    SWAP16(page->macro);
+  }
+}
+
+/* Per-song MIDI channel setup, terminated by songId 0xFFFF. The channel
+ * entries behind it are all single bytes. */
+static void SwapMidiSetup(MIDISETUP* ms) {
+  if (ms == NULL) {
+    return;
+  }
+  /* 0xFFFF reads the same in either order, so the end is found either way. */
+  for (; ms->songId != 0xFFFF; ++ms) {
+    SWAP16(ms->songId);
+  }
+}
+
+/* An FX group keeps its effect table at the first of the trailing offsets;
+ * sndFXStart() looks entries up by id, so it has to be in host order before
+ * any effect can start. */
 static void SwapFXTable(FX_DATA* fd) {
   u16 n;
   u16 i;
@@ -92,16 +116,21 @@ void salSwapProjectData(void* prj) {
     SWAP32(g->keymapOff);
     SWAP32(g->layerOff);
 
-    /* The trailing union is 0xC bytes for a song but only 0x4 for an FX
-     * group, and a packed FX node is followed immediately by the next one --
-     * so swapping the full union unconditionally would corrupt its neighbour. */
+    /* Which of the trailing offsets are live depends on the group type, and
+     * swapping ones the group does not own would corrupt whatever follows.
+     * Type 1 is an effect group and uses only the first, as its effect table
+     * (see InsertFXTab); type 0 is a song group and uses all three (see
+     * seqPlaySong). */
     if (g->type == 1) {
+      SWAP32(g->data.song.normpageOff);
+      SwapFXTable((FX_DATA*)((u8*)prj + g->data.song.normpageOff));
+    } else {
       SWAP32(g->data.song.normpageOff);
       SWAP32(g->data.song.drumpageOff);
       SWAP32(g->data.song.midiSetupOff);
-      SwapFXTable((FX_DATA*)((u8*)prj + g->data.song.normpageOff));
-    } else {
-      SWAP32(g->data.fx.tableOff);
+      SwapPageTable((PAGE*)((u8*)prj + g->data.song.normpageOff));
+      SwapPageTable((PAGE*)((u8*)prj + g->data.song.drumpageOff));
+      SwapMidiSetup((MIDISETUP*)((u8*)prj + g->data.song.midiSetupOff));
     }
 
     SwapIDList((u16*)((u8*)prj + g->sampleOff));
