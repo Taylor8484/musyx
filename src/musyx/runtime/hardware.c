@@ -6,6 +6,8 @@
 
 #include "musyx/musyx.h"
 #include "musyx/hardware.h"
+
+#include <stdint.h>
 #include "math.h"
 #include "float.h"
 #include "musyx/assert.h"
@@ -494,7 +496,9 @@ void hwFlushStream(void* base, u32 offset, u32 bytes, u8 hwStreamHandle, void (*
   bytes += (offset & 31);
   offset &= ~31;
   bytes = (bytes + 31) & ~31;
-  mram = (u32)base + offset;
+  /* base is a host pointer: truncating it to 32 bits leaves a source address
+   * that no longer refers to the stream buffer. */
+  mram = (uintptr_t)base + offset;
 #if MUSY_TARGET == MUSY_TARGET_DOLPHIN
   DCStoreRange((void*)mram, bytes);
 #endif

@@ -449,8 +449,8 @@ void aramUploadData(void* mram, unsigned long aram, unsigned long len, unsigned 
     /* Real hardware would simply refuse a transfer outside ARAM; here an
      * unchecked copy would run off the emulated buffer. */
     if (base == NULL || mram == NULL || aram > size || len > size - aram) {
-      MUSY_DEBUG("Refusing ARAM upload of %u bytes to 0x%X (ARAM is %u bytes)\n", (unsigned)len,
-                 (unsigned)aram, (unsigned)size);
+      MUSY_REPORT("[ARAM] refusing upload of %u bytes to 0x%X (ARAM is %u bytes)\n", (unsigned)len,
+                  (unsigned)aram, (unsigned)size);
     } else {
       memcpy(base + aram, mram, len);
     }
