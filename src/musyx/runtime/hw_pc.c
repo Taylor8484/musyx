@@ -148,8 +148,11 @@ bool salExitDsp() { return false; }
 void salStartDsp(u16* cmdList) {}
 
 void salCtrlDsp(s16* dest) {
+  /* Updates every voice's parameter block for this frame, then -- in place of
+   * handing the resulting command list to a DSP -- mixes from those blocks in
+   * software. */
   salBuildCommandList(dest, salGetStartDelay());
-  salStartDsp(dspCmdList);
+  salMixFrame(dest);
 }
 
 u32 salGetStartDelay() { return 0; }
