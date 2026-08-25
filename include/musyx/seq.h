@@ -182,8 +182,11 @@ typedef struct SEQ_PATTERN {
   u32 noteData;   // offset 0xC, size 0x4
 } SEQ_PATTERN;
 
-#pragma push
-#pragma pack(1)
+/* `#pragma push`/`#pragma pop` are Metrowerks-only. Every other compiler
+ * ignores them but still honours the pack below, so the packing leaked out
+ * of this header and changed the layout of anything included after it.
+ * pack(push/pop) is understood by all of them. */
+#pragma pack(push, 1)
 typedef struct CHANNEL_DEFAULTS {
   // total size: 0x9
   u8 pbRange; // offset 0x0, size 0x1
@@ -192,7 +195,7 @@ typedef struct CHANNEL_DEFAULTS {
   u32 lpfUpperFrqBoundary; // offset 0x5, size 0x4
 #endif
 } CHANNEL_DEFAULTS;
-#pragma pop
+#pragma pack(pop)
 
 typedef struct MIDI_CHANNEL_SETUP {
   // total size: 0x5
