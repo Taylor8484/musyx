@@ -467,15 +467,8 @@ u32 seqPlaySong(u16 sgid, u16 sid, void* arrfile, SND_PLAYPARA* para, u8 irq_cal
       }
 
       if (GS_GSI[i].gAddr->type == 0) {
-#if MUSY_TARGET == MUSY_TARGET_PC
-        /* The arrangement data a song points at -- track and pattern tables and
-         * the event streams behind them -- is still in the big-endian layout the
-         * tools emit, so seqStartPlay() would follow offsets that are not yet
-         * host order. Decline the song rather than fault on it; effects, which
-         * do not go through the sequencer, are unaffected. */
-        MUSY_DEBUG("Song data byteswapping is not implemented; song ID=%d declined.\n", sid);
-        return 0xffffffff;
-#endif
+        /* On PC `arrfile` has already been converted to host order by the
+         * client's sndSwapSongData() call; see src/msm/msmmus.c. */
         g = GS_GSI[i].gAddr;
         prj = GS_GSI[i].prjAddr;
         norm = (PAGE*)((size_t)prj + g->data.song.normpageOff);

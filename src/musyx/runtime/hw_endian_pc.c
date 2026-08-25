@@ -232,6 +232,283 @@ void salSwapPoolData(void* pool) {
   SwapPoolChain(p->layerOff ? (MEM_DATA*)((u8*)p + p->layerOff) : NULL, POOL_SECTION_LAYER);
 }
 
+/* ---------------------------------------------------------------------------
+ * Arrangement (song) data
+ *
+ * Unlike the project, pool and sample directory, an arrangement never passes
+ * through sndPushGroup() -- the client loads it and hands the pointer straight
+ * to sndSeqPlay(). So the conversion is exported instead, and the client calls
+ * it once per freshly loaded arrangement (see src/msm/msmmus.c).
+ *
+ * The file has no table of contents, so the only way to know how long the
+ * variable-length parts are is to walk them exactly the way the sequencer does:
+ *
+ *   ARR header  22 words, no byte fields.
+ *   mTrack      MTRACK_DATA pairs, ended by a time of -1.
+ *   tTab        64 track offsets; each track is TENTRY records ended by a
+ *               pattern id of 0xFFFF, with 0xFFFE marking a loop back.
+ *   pTab        pattern offsets. Its length is recorded nowhere, so only the
+ *               entries the tracks actually name are converted -- the runtime
+ *               never dereferences the others.
+ *   patterns    a 3-word header followed by variable-width note records.
+ *
+ * The pitch-bend and modulation streams hanging off a pattern are deliberately
+ * left alone: GetStreamValue() decodes them a byte at a time, so they carry no
+ * byte order of their own.
+ *
+ * Every read is bounded by the stored size of the arrangement, so data that
+ * does not match these assumptions fails the call rather than walking off the
+ * buffer.
+ */
+
+typedef struct ARR_WALK {
+  u8* base;
+  u32 size;
+  bool ok;
+} ARR_WALK;
+
+static u16 Read16At(const u8* p) { return (u16)(((u16)p[0] << 8) | p[1]); }
+
+static u32 Read32At(const u8* p) {
+  return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+
+/* Byte-wise so that an odd offset inside a pattern cannot trap. */
+static void Swap16At(u8* p) {
+  u8 t = p[0];
+  p[0] = p[1];
+  p[1] = t;
+}
+
+static void Swap32At(u8* p) {
+  u8 t;
+  t = p[0];
+  p[0] = p[3];
+  p[3] = t;
+  t = p[1];
+  p[1] = p[2];
+  p[2] = t;
+}
+
+/* A zero offset means "absent" everywhere in this format, so it is rejected
+ * here rather than silently aliasing the header. */
+static u8* ArrAt(ARR_WALK* w, u32 offset, u32 len) {
+  if (!w->ok) {
+    return NULL;
+  }
+  if (offset == 0 || offset >= w->size || len > w->size - offset) {
+    MUSY_REPORT("musyx: arrangement offset 0x%X (%u bytes) is outside the %u byte file.\n",
+               (unsigned)offset, (unsigned)len, (unsigned)w->size);
+    w->ok = false;
+    return NULL;
+  }
+  return w->base + offset;
+}
+
+/* Note records are 6 bytes, except the two control forms the sequencer steps
+ * over 4 bytes at a time (see GenerateNextTrackEvent). Only `time` -- and, for
+ * a real note, `length` -- are multi-byte. */
+static void SwapNoteData(ARR_WALK* w, u32 offset) {
+  for (;;) {
+    u8 key;
+    u8 velocity;
+    u8* p = ArrAt(w, offset, 4);
+
+    if (p == NULL) {
+      return;
+    }
+
+    key = p[2];
+    velocity = p[3];
+    if (key == 0xFF && velocity == 0xFF) {
+      return; /* end of pattern */
+    }
+
+    Swap16At(p); /* time */
+
+    if ((key & 0x80) != 0 || (key | velocity) == 0) {
+      offset += 4;
+      continue;
+    }
+
+    if (ArrAt(w, offset, 6) == NULL) {
+      return;
+    }
+    Swap16At(w->base + offset + offsetof(NOTE_DATA, length));
+    offset += 6;
+  }
+}
+
+static void SwapPattern(ARR_WALK* w, u32 offset) {
+  u8* p = ArrAt(w, offset, sizeof(SEQ_PATTERN));
+  u32 pitchBend;
+  u32 modulation;
+
+  if (p == NULL) {
+    return;
+  }
+
+  pitchBend = Read32At(p + offsetof(SEQ_PATTERN, pitchBend));
+  modulation = Read32At(p + offsetof(SEQ_PATTERN, modulation));
+
+  Swap32At(p + offsetof(SEQ_PATTERN, headerLen));
+  Swap32At(p + offsetof(SEQ_PATTERN, pitchBend));
+  Swap32At(p + offsetof(SEQ_PATTERN, modulation));
+
+  /* The streams themselves need no conversion, but InitStream() will follow
+   * these, so a bad offset has to be caught here. */
+  if ((pitchBend != 0 && pitchBend >= w->size) || (modulation != 0 && modulation >= w->size)) {
+    MUSY_REPORT("musyx: pattern at 0x%X has a stream offset outside the file.\n", (unsigned)offset);
+    w->ok = false;
+    return;
+  }
+
+  /* seqStartPlay's reader takes the note data to begin where the 3 word header
+   * ends, so headerLen is informational. */
+  SwapNoteData(w, offset + offsetof(SEQ_PATTERN, noteData));
+}
+
+static void SwapTrack(ARR_WALK* w, u32 offset, u8* seen) {
+  for (;;) {
+    u16 pattern;
+    u8* p = ArrAt(w, offset, sizeof(TENTRY));
+
+    if (p == NULL) {
+      return;
+    }
+
+    pattern = Read16At(p + offsetof(TENTRY, pattern));
+    Swap32At(p + offsetof(TENTRY, time));
+    Swap16At(p + offsetof(TENTRY, pattern));
+
+    if (pattern == 0xFFFF) {
+      return; /* end of track */
+    }
+
+    if (pattern == 0xFFFE) {
+      /* Loop entry: the bytes a normal record spends on transpose and
+       * velocityAdd are a u16 index back into the track. It ends the track as
+       * surely as 0xFFFF does -- the sequencer jumps back to that index and
+       * never reads past here, so the next track begins immediately after. */
+      Swap16At(p + offsetof(TENTRY, transpose));
+      return;
+    }
+
+    seen[pattern >> 3] |= (u8)(1 << (pattern & 7));
+    offset += sizeof(TENTRY);
+  }
+}
+
+/* The ARR struct in seq.h is the 2.x layout: 16 loop points and a
+ * track/section table. A 1.x file has a single section, so its header stops
+ * after the first loop point -- and the track table starts immediately there,
+ * which is why the difference matters. Sweeping sizeof(ARR) over 1.x data
+ * swaps the first 16 track offsets a second time, undoing them. */
+#if MUSY_VERSION >= MUSY_VERSION_CHECK(2, 0, 1)
+#define ARR_HEADER_WORDS (sizeof(ARR) / sizeof(u32))
+#else
+#define ARR_HEADER_WORDS ((offsetof(ARR, loopPoint) / sizeof(u32)) + 1)
+#endif
+
+#define ARR_PATTERN_IDS 0x10000
+#define ARR_SEEN_BYTES (ARR_PATTERN_IDS / 8)
+
+bool sndSwapSongData(void* arrfile, u32 size) {
+  ARR_WALK w;
+  ARR* arr;
+  u8* seen;
+  u8* tTab;
+  u32 i;
+
+  if (arrfile == NULL || size < sizeof(ARR)) {
+    MUSY_REPORT("musyx: arrangement is too small to be an arrangement (%u bytes).\n", (unsigned)size);
+    return false;
+  }
+
+  /* One bit per pattern id -- a track may name the same pattern many times, and
+   * converting one twice would put it back into big-endian order. */
+  seen = salMalloc(ARR_SEEN_BYTES);
+  if (seen == NULL) {
+    MUSY_REPORT("musyx: could not allocate the arrangement pattern set.\n");
+    return false;
+  }
+  memset(seen, 0, ARR_SEEN_BYTES);
+
+  w.base = arrfile;
+  w.size = size;
+  w.ok = true;
+
+  for (i = 0; i < ARR_HEADER_WORDS * sizeof(u32); i += sizeof(u32)) {
+    Swap32At(w.base + i);
+  }
+  arr = arrfile;
+
+  if (arr->mTrack != 0) {
+    u32 ofs = arr->mTrack;
+    for (;;) {
+      /* The list ends with a bare time of -1 -- only that word is ever read to
+       * spot the end, so the last entry has no bpm behind it. Check for it
+       * before insisting on a whole entry's worth of room. */
+      u8* p = ArrAt(&w, ofs, sizeof(u32));
+      if (p == NULL) {
+        break;
+      }
+      /* -1 reads the same in either order. */
+      if (Read32At(p) == 0xFFFFFFFF) {
+        break;
+      }
+      if (ArrAt(&w, ofs, sizeof(MTRACK_DATA)) == NULL) {
+        break;
+      }
+      Swap32At(p + offsetof(MTRACK_DATA, time));
+      Swap32At(p + offsetof(MTRACK_DATA, bpm));
+      ofs += sizeof(MTRACK_DATA);
+    }
+  }
+
+  /* Byte tables the sequencer follows but this walk does not, so their offsets
+   * would otherwise go unchecked. tsTab is only read when the top bit of `info`
+   * is set (see seqStartPlay). */
+  if (arr->tmTab == 0 || arr->tmTab >= size ||
+      (ARR_HEADER_WORDS * sizeof(u32) == sizeof(ARR) && (arr->info & 0x80000000) != 0 &&
+       (arr->tsTab == 0 || arr->tsTab >= size))) {
+    MUSY_REPORT("musyx: arrangement has a track/section table outside the file.\n");
+    salFree(seen);
+    return false;
+  }
+
+  tTab = ArrAt(&w, arr->tTab, 64 * sizeof(u32));
+  if (tTab != NULL) {
+    for (i = 0; i < 64; ++i) {
+      u32 trackOfs = Read32At(tTab + i * sizeof(u32));
+      Swap32At(tTab + i * sizeof(u32));
+      if (trackOfs != 0) {
+        SwapTrack(&w, trackOfs, seen);
+      }
+    }
+  }
+
+  for (i = 0; w.ok && i < ARR_PATTERN_IDS; ++i) {
+    u8* entry;
+    u32 patternOfs;
+
+    if ((seen[i >> 3] & (1 << (i & 7))) == 0) {
+      continue;
+    }
+
+    entry = ArrAt(&w, arr->pTab + i * sizeof(u32), sizeof(u32));
+    if (entry == NULL) {
+      break;
+    }
+    patternOfs = Read32At(entry);
+    Swap32At(entry);
+    SwapPattern(&w, patternOfs);
+  }
+
+  salFree(seen);
+  return w.ok;
+}
+
 SDIR_DATA* salSdirToHost(void* sdir) {
   SDIR_DATA_INTER* in = sdir;
   SDIR_DATA* out;
