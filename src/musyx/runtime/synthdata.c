@@ -473,6 +473,10 @@ bool dataInsertFX(u16 gid, struct FX_TAB* fx, u16 fxNum) {
       }
 
       dataFXGroupNum++;
+#if MUSY_TARGET == MUSY_TARGET_PC
+      MUSY_DEBUG("musyx: effect table for group %u inserted, %u entries (%u table(s) loaded).\n",
+                  (unsigned)gid, (unsigned)fxNum, (unsigned)dataFXGroupNum);
+#endif
       hwEnableIrq();
       return TRUE;
     }
@@ -620,8 +624,11 @@ MSTEP* dataGetMacro(u16 mid) {
   if (dataMacMainTab[main].num != 0) {
     base = dataMacMainTab[main].subTabIndex;
     key.id = mid;
+    /* MAC_SUBTAB leads with a pointer, so it is 8 bytes only on a 32-bit host.
+     * The literal 8 here made the search stride half an element on 64-bit and
+     * never match -- every other sndBSearch call site uses sizeof(). */
     if ((result = (MAC_SUBTAB*)sndBSearch(&key, &dataMacSubTabmem[base], dataMacMainTab[main].num,
-                                          8, maccmp)) != NULL) {
+                                          sizeof(MAC_SUBTAB), maccmp)) != NULL) {
       return result->data;
     }
   }

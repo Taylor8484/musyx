@@ -1039,6 +1039,10 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
 #endif
             } break;
             default:
+              MUSY_DEBUG("musyx: sample has unexpected compType %u (info=0x%08X len=%u loopLen=%u)\n",
+                          (unsigned)dsp_vptr->smp_info.compType, (unsigned)dsp_vptr->smp_info.info,
+                          (unsigned)dsp_vptr->smp_info.length,
+                          (unsigned)dsp_vptr->smp_info.loopLength);
               MUSY_ASSERT(FALSE);
               break;
             }
@@ -1607,7 +1611,10 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
             pb->update.updNum[s] = 0;
           }
           pptr = dsp_vptr->patchData;
-          pend = (u16*)((u32)dsp_vptr->patchData + 0x80);
+          /* patchData is a real pointer: rounding it through u32 truncated it on
+           * a 64-bit host, so pend came out as garbage well below pptr and every
+           * bounds assertion below it failed. The arithmetic is in bytes. */
+          pend = (u16*)((u8*)dsp_vptr->patchData + 0x80);
           if (mix_start != 0) {
             MUSY_ASSERT((pptr + 2) <= pend);
             pptr[0] = 7;
@@ -1683,7 +1690,7 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
             salSynthSendMessage(dsp_vptr, 0);
             salDeactivateVoice(dsp_vptr);
           }
-          DCStoreRangeNoSync(dsp_vptr->patchData, (u32)pptr - (u32)dsp_vptr->patchData);
+          DCStoreRangeNoSync(dsp_vptr->patchData, (u32)((u8*)pptr - (u8*)dsp_vptr->patchData));
 #if MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 0) // MUSYXTODO
           cyclesUsed += dspMixerCycles[pb->mixerCtrl] + 0x4FE;
 #else
