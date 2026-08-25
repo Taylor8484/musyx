@@ -318,6 +318,14 @@ static void BuildTransTab(u8* tab, PAGE* page) {
   }
 
   for (i = 0; page->index != 0xFF; ++i, page++) {
+    /* MIDI programs are 0-127 and the table is sized for exactly that, so an
+     * index above it means the page table is not what it claims to be --
+     * writing at it would run off the end of the sequencer instance. */
+    if (page->index >= 128) {
+      MUSY_REPORT("musyx: program page %u has out-of-range index %u; table truncated.\n",
+                  (unsigned)i, (unsigned)page->index);
+      return;
+    }
     tab[page->index] = i;
   }
 }

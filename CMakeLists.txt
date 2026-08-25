@@ -48,8 +48,14 @@ target_compile_options(musyx PRIVATE -Wno-stringop-overflow -Wno-pointer-to-int-
 else ()
 target_compile_options(musyx PRIVATE)
 endif ()
+# musyx's diagnostics and assertions are all behind MUSYX_DEBUG and compile to
+# nothing without it -- MUSY_DEBUG becomes an empty macro, so every failure the
+# runtime reports is swallowed. On while the PC audio path is being brought up.
+option(MUSYX_DEBUG_OUTPUT "Compile musyx's diagnostics and assertions" ON)
+
 target_compile_definitions(musyx PUBLIC
         -DMUSY_TARGET=${MUSY_TARGET}
+        $<$<BOOL:${MUSYX_DEBUG_OUTPUT}>:MUSYX_DEBUG>
         $<$<CONFIG:Release>:NDEBUG>
         $<$<CONFIG:MinSizeRel>:NDEBUG>)
 set_target_properties(musyx PROPERTIES DEBUG_POSTFIX D)
