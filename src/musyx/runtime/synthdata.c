@@ -1,4 +1,6 @@
 #include "musyx/synthdata.h"
+
+#include <stdint.h>
 #include "musyx/assert.h"
 #include "musyx/hardware.h"
 #include "musyx/snd.h"
@@ -388,12 +390,19 @@ done:
 
   MUSY_ASSERT_MSG(sdir != NULL,
                   "Sample ID to be inserted could not be found in any sample directory.\n");
+  /* The assert above is compiled out in release builds, which left the misses
+   * below to fault on a NULL dereference. A group legitimately reaches here
+   * when it references a sample owned by a directory that is not currently
+   * pushed, so decline the reference rather than taking the process down. */
+  if (sdir == NULL) {
+    return 0;
+  }
 
   if (MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 1) ? (sdir->ref_cnt == 0) : TRUE) {
 #if MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 1)
-    sdir->addr = (void*)((size_t)sdir->offset + (s32)dataSmpSDirs[i].base);
+    sdir->addr = (void*)((size_t)sdir->offset + (uintptr_t)dataSmpSDirs[i].base);
 #else
-    sdir->addr = (void*)((size_t)sdir->offset + (s32)sdirTab->base);
+    sdir->addr = (void*)((size_t)sdir->offset + (uintptr_t)sdirTab->base);
 #endif
     header = &sdir->header;
     hwSaveSample(&header, &sdir->addr

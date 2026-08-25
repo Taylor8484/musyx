@@ -30,6 +30,7 @@ add_library(musyx STATIC
         src/musyx/runtime/dsp_import.c
         src/musyx/runtime/hw_dolphin.c
         src/musyx/runtime/hw_pc.c
+        src/musyx/runtime/hw_endian_pc.c
         src/musyx/runtime/hw_memory.c
         src/musyx/runtime/hw_lib_dolphin.c
         src/musyx/runtime/CheapReverb/creverb_fx.c

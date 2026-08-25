@@ -2,6 +2,7 @@
 #include "musyx/assert.h"
 #include "musyx/hardware.h"
 #include "musyx/s3d.h"
+#include "musyx/sal.h"
 #include "musyx/seq.h"
 #include "musyx/synth.h"
 #include "musyx/synthdata.h"
@@ -245,6 +246,18 @@ bool sndPushGroup(void* prj_data, u16 gid, void* samples, void* sdir, void* pool
   MUSY_ASSERT_MSG(sdir != NULL, "Sample directory pointer is NULL");
 
   if (sndActive && SP_CURRENT < 128) {
+#if MUSY_TARGET == MUSY_TARGET_PC
+    /* The caller hands us data straight from storage, so it is still in the
+     * big-endian layout the authoring tools emit. Fix it up before anything
+     * walks it. The sample directory also widens, so it is replaced by a
+     * host-order copy that sndPopGroup() releases. */
+    salSwapProjectData(prj_data);
+    salSwapPoolData(pool);
+    sdir = salSdirToHost(sdir);
+    if (sdir == NULL) {
+      return FALSE;
+    }
+#endif
     g = prj_data;
 
     while (g->nextOff != 0xFFFFFFFF) {
@@ -318,6 +331,9 @@ bool sndPopGroup() {
   if (g->type == 1) {
     RemoveFXTab(g->id);
   }
+#if MUSY_TARGET == MUSY_TARGET_PC
+  salFreeHostSdir(sdir);
+#endif
   return 1;
 }
 
