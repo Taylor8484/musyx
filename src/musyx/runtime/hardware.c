@@ -573,6 +573,23 @@ void hwSaveSample(void* header, void* data
                                      aramInfo
 #endif
   );
+#elif MUSY_TARGET == MUSY_TARGET_PC
+  /* `header` is a SAMPLE_HEADER**, and `data` points at the sample directory
+   * entry's addr field, which arrives holding a host pointer to the sample in
+   * main memory. Copy it into emulated ARAM and leave the ARAM offset behind,
+   * so everything downstream addresses samples exactly as it does on hardware
+   * -- and so the hwRemoveSample() below has a matching store to undo.
+   *
+   * Not shared with the branch above because that one reaches the header
+   * through a 32-bit cast of a pointer-to-pointer, which cannot survive on a
+   * 64-bit host. */
+  {
+    SAMPLE_HEADER* hdr = *(SAMPLE_HEADER**)header;
+    void** addr = (void**)data;
+    u32 len = convert_length(hdr->length & 0xFFFFFF, (u8)(hdr->length >> 24));
+
+    *addr = aramStoreData(*addr, len);
+  }
 #endif
 }
 
