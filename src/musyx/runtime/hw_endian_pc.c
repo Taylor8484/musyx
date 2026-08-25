@@ -51,6 +51,25 @@ static void SwapIDList(u16* ref) {
   }
 }
 
+/* A song group carries an FX table at normpageOff; sndFXStart() looks entries
+ * up by id, so it has to be in host order before any effect can start. */
+static void SwapFXTable(FX_DATA* fd) {
+  u16 n;
+  u16 i;
+
+  if (fd == NULL) {
+    return;
+  }
+
+  SWAP16(fd->num);
+  n = fd->num;
+  for (i = 0; i < n; ++i) {
+    SWAP16(fd->fx[i].id);
+    SWAP16(fd->fx[i].macro);
+    /* the remaining fields are single bytes */
+  }
+}
+
 void salSwapProjectData(void* prj) {
   GROUP_DATA* g;
 
@@ -80,6 +99,7 @@ void salSwapProjectData(void* prj) {
       SWAP32(g->data.song.normpageOff);
       SWAP32(g->data.song.drumpageOff);
       SWAP32(g->data.song.midiSetupOff);
+      SwapFXTable((FX_DATA*)((u8*)prj + g->data.song.normpageOff));
     } else {
       SWAP32(g->data.fx.tableOff);
     }

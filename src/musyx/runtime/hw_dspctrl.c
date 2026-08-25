@@ -28,6 +28,26 @@
 #if MUSY_TARGET == MUSY_TARGET_DOLPHIN
 #include "dolphin/os/OSCache.h"
 #include <dolphin/os.h>
+#elif MUSY_TARGET == MUSY_TARGET_PC
+/* salBuildCommandList() is far more than command emission: the per-frame voice
+ * update -- envelopes, volume ramps, pitch, sample addressing, de-popping and
+ * voice prioritisation -- all lives inside it. PC needs that work, so the body
+ * is compiled here too and only the parts that talk to real DSP hardware are
+ * neutralised.
+ *
+ * The command list it emits is written to a scratch buffer nothing executes;
+ * a software mixer reads the parameter blocks the update leaves behind. */
+
+/* No caches to keep coherent with a DSP that does not exist. */
+#define DCFlushRange(addr, len) ((void)0)
+#define DCFlushRangeNoSync(addr, len) ((void)0)
+#define DCStoreRangeNoSync(addr, len) ((void)0)
+
+/* Retained so the DSP cycle budget -- and therefore how many voices stay
+ * audible -- matches the console rather than becoming unbounded. */
+#ifndef __OSBusClock
+#define __OSBusClock 162000000u
+#endif
 #endif
 
 #include <string.h>
@@ -376,7 +396,13 @@ bool salInitDspCtrl(u8 numVoices, u8 numStudios, u32 defaultStudioDPL2) {
 
   MUSY_ASSERT(salMaxStudioNum <= SAL_MAX_STUDIONUM);
   dspARAMZeroBuffer = aramGetZeroBuffer();
+#if MUSY_TARGET == MUSY_TARGET_PC
+  /* Nothing consumes this list, so it only ever grows across a frame. Sized
+   * well past what the cycle budget can emit rather than risking a run-off. */
+  if ((dspCmdList = SAL_MALLOC(32768 * sizeof(u16)))) {
+#else
   if ((dspCmdList = SAL_MALLOC(1024 * sizeof(u16)))) {
+#endif
     MUSY_DEBUG("Allocated dspCmdList.\n\n");
     if ((dspSurround = SAL_MALLOC(160 * sizeof(s32)))) {
       MUSY_DEBUG("Allocated surround buffer.\n\n");
@@ -735,7 +761,7 @@ static void SortVoices(DSPvoice** voices, long l, long r) {
 }
 
 void salBuildCommandList(s16* dest, u32 nsDelay) {
-#if MUSY_TARGET == MUSY_TARGET_DOLPHIN
+#if MUSY_TARGET == MUSY_TARGET_DOLPHIN || MUSY_TARGET == MUSY_TARGET_PC
   static const u16 pbOffsets[9] = {10, 12, 24, 14, 16, 26, 18, 20, 22};
   static DSPvoice* voices[64];
 
@@ -2006,8 +2032,6 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
     dbgActiveVoicesMax = dbgActiveVoices;
   }
 #endif
-#else
-  // TODO implement for PC
 #endif
 }
 
