@@ -410,82 +410,274 @@ void aramFreeStreamBuffer(unsigned char id) {
 }
 
 #elif MUSY_TARGET == MUSY_TARGET_PC
-// typedef struct ARAMTransferJob {
-//   // total size: 0x28
-//   ARQRequest arq;                  // offset 0x0, size 0x20
-//   void (*callback)(unsigned long); // offset 0x20, size 0x4
-//   unsigned long user;              // offset 0x24, size 0x4
-// } ARAMTransferJob;
-//
-// typedef struct ARAMTransferQueue {
-//   // total size: 0x284
-//   ARAMTransferJob queue[16]; // offset 0x0, size 0x280
-//   vu8 write;                 // offset 0x280, size 0x1
-//   vu8 valid;                 // offset 0x281, size 0x1
-// } ARAMTransferQueue;
-//
-// typedef struct STREAM_BUFFER {
-//   // total size: 0x10
-//   struct STREAM_BUFFER* next; // offset 0x0, size 0x4
-//   unsigned long aram;         // offset 0x4, size 0x4
-//   unsigned long length;       // offset 0x8, size 0x4
-//   unsigned long allocLength;  // offset 0xC, size 0x4
-// } STREAM_BUFFER;
-//
-// static unsigned long aramTop;                                     // size: 0x4
-// static unsigned long aramWrite;                                   // size: 0x4
-// static unsigned long aramStream;                                  // size: 0x4
-// static void* (*aramUploadCallback)(unsigned long, unsigned long); // size: 0x4
-// static unsigned long aramUploadChunkSize;                         // size: 0x4
-//
-// static ARAMTransferQueue aramQueueLo;
-// static ARAMTransferQueue aramQueueHi;
+#include <stdint.h>
+#include <string.h>
 
-// static STREAM_BUFFER aramStreamBuffers[64];
-// static STREAM_BUFFER* aramUsedStreamBuffers;
-// static STREAM_BUFFER* aramFreeStreamBuffers;
-// static STREAM_BUFFER* aramIdleStreamBuffers;
+/* There is no ARAM on PC. The host application emulates it as a flat buffer and
+ * hands out its base pointer via ARGetStorageAddress(), so an "ARAM address" is
+ * just an offset into it and every transfer is a memcpy that completes before
+ * it returns. That collapses the Dolphin ARQ job queue down to a direct call:
+ * the queue existed only to pipeline asynchronous DMA against the CPU.
+ *
+ * These are declared here rather than pulled in from <dolphin/ar.h> so that
+ * musyx keeps building without a Dolphin SDK include path.
+ */
+extern void* ARGetStorageAddress(void);
+extern u32 ARGetBaseAddress(void);
+extern u32 ARGetSize(void);
+extern u32 ARQGetChunkSize(void);
+
+static u32 aramTop;
+static u32 aramWrite;
+static u32 aramStream;
+static void* (*aramUploadCallback)(u32, u32);
+static u32 aramUploadChunkSize;
+
+static STREAM_BUFFER aramStreamBuffers[64];
+static STREAM_BUFFER* aramUsedStreamBuffers;
+static STREAM_BUFFER* aramFreeStreamBuffers;
+static STREAM_BUFFER* aramIdleStreamBuffers;
 
 static void InitStreamBuffers();
 
-static void aramQueueInit() {}
-
-static void aramQueueCallback(unsigned long ptr) {}
-
 void aramUploadData(void* mram, unsigned long aram, unsigned long len, unsigned long highPrio,
-                    void (*callback)(unsigned long), unsigned long user) {}
+                    void (*callback)(size_t), unsigned long user) {
+  memcpy((u8*)ARGetStorageAddress() + aram, mram, len);
 
-void aramSyncTransferQueue() {}
+  /* The Dolphin path reports completion from the ARQ callback with the caller's
+   * user value; the transfer is already done here, so report it inline. */
+  if (callback != NULL) {
+    callback((size_t)user);
+  }
+}
 
-void aramInit(unsigned long length) {}
+void aramSyncTransferQueue() {
+  /* Transfers are synchronous, so there is never anything outstanding. */
+}
+
+void aramInit(unsigned long length) {
+  s16* tmpMem;    // zero buffer staged in MRAM
+  unsigned long i;
+  unsigned long aramBase;
+
+  MUSY_ASSERT_MSG(length > sizeof(s16) * 640, "ARAM size is too small");
+
+  aramBase = ARGetBaseAddress();
+
+  tmpMem = (s16*)salMalloc(sizeof(s16) * 640);
+  MUSY_ASSERT_MSG(tmpMem != NULL, "Could not allocate temporary storage");
+
+  for (i = 0; i < 640; ++i) {
+    tmpMem[i] = 0;
+  }
+
+  aramUploadData(tmpMem, aramBase, sizeof(s16) * 640, 0, NULL, 0);
+  salFree(tmpMem);
+
+  aramTop = aramBase + length;
+  if (aramTop > ARGetSize()) {
+    aramTop = ARGetSize();
+  }
+
+  aramWrite = aramBase + sizeof(s16) * 640;
+  aramUploadCallback = NULL;
+  InitStreamBuffers();
+  MUSY_DEBUG("MusyX ARAM handler initialized\n");
+}
 
 void aramExit() {}
 
-unsigned long aramGetZeroBuffer() { return 0; }
+unsigned long aramGetZeroBuffer() { return ARGetBaseAddress(); }
 
-void aramSetUploadCallback(ARAMUploadCallback callback,
-                           unsigned long chunckSize) {}
+void aramSetUploadCallback(ARAMUploadCallback callback, unsigned long chunckSize) {
+  unsigned long acs;
 
-void* aramStoreData(void* src, unsigned long len) { return NULL;}
+  if (callback != NULL) {
+    chunckSize = (chunckSize + 31) & ~31;
+    acs = ARQGetChunkSize();
+    aramUploadChunkSize = chunckSize < acs ? acs : chunckSize;
+  }
 
-void aramRemoveData(void* aram, unsigned long len) {}
+  aramUploadCallback = callback;
+}
 
-static void InitStreamBuffers() {}
+void* aramStoreData(void* src, unsigned long len) {
+  unsigned long addr;
+  void* buffer;
+  unsigned long blkSize;
 
-unsigned char aramAllocateStreamBuffer(u32 len) { return 0; }
+  len = (len + 31) & ~31;
+
+  MUSY_ASSERT_MSG(aramWrite + len <= aramStream, "Data will not fit in remaining ARAM space");
+  if (aramWrite + len > aramStream) {
+    return NULL;
+  }
+
+  addr = aramWrite;
+  if (aramUploadCallback == NULL) {
+    aramUploadData(src, aramWrite, len, 0, NULL, 0);
+    aramWrite += len;
+    return (void*)(uintptr_t)addr;
+  }
+
+  while (len != 0) {
+    blkSize = len >= aramUploadChunkSize ? aramUploadChunkSize : len;
+    buffer = (void*)aramUploadCallback((u32)(uintptr_t)src, blkSize);
+
+    aramUploadData(buffer, aramWrite, blkSize, 0, NULL, 0);
+    len -= blkSize;
+    aramWrite += blkSize;
+    src = (void*)((uintptr_t)src + blkSize);
+  }
+
+  return (void*)(uintptr_t)addr;
+}
+
+void aramRemoveData(void* aram, unsigned long len) {
+  len = (len + 31) & ~31;
+  aramWrite -= len;
+  MUSY_ASSERT_MSG((u32)(uintptr_t)aram == aramWrite,
+                  "Current ARAM address does not match originally allocated one");
+}
+
+static void InitStreamBuffers() {
+  unsigned long i;
+
+  aramUsedStreamBuffers = NULL;
+  aramFreeStreamBuffers = NULL;
+  aramIdleStreamBuffers = aramStreamBuffers;
+  for (i = 1; i < 64; ++i) {
+    aramStreamBuffers[i - 1].next = &aramStreamBuffers[i];
+  }
+  aramStreamBuffers[i - 1].next = NULL;
+  aramStream = aramTop;
+}
+
+unsigned char aramAllocateStreamBuffer(u32 len) {
+  STREAM_BUFFER* sb;
+  STREAM_BUFFER* oSb;
+  STREAM_BUFFER* lastSb;
+  u32 minLen;
+
+  len = (len + 31) & ~31;
+  lastSb = oSb = NULL;
+  minLen = -1;
+
+  for (sb = aramFreeStreamBuffers; sb != NULL; sb = sb->next) {
+    if (sb->allocLength == len) {
+      oSb = sb;
+      break;
+    }
+
+    if (sb->allocLength > len && minLen > sb->allocLength) {
+      oSb = sb;
+      minLen = sb->allocLength;
+    }
+    lastSb = sb;
+  }
+
+  if (oSb == NULL) {
+    if (aramIdleStreamBuffers != NULL && aramStream - len >= aramWrite) {
+      oSb = aramIdleStreamBuffers;
+      aramIdleStreamBuffers = oSb->next;
+      oSb->allocLength = len;
+      oSb->length = len;
+      aramStream -= len;
+      oSb->aram = aramStream;
+      oSb->next = aramUsedStreamBuffers;
+      aramUsedStreamBuffers = oSb;
+    }
+  } else {
+    if (lastSb != NULL) {
+      lastSb->next = oSb->next;
+    } else {
+      aramFreeStreamBuffers = oSb->next;
+    }
+
+    oSb->length = len;
+    oSb->next = aramUsedStreamBuffers;
+    aramUsedStreamBuffers = oSb;
+  }
+
+  if (oSb == NULL) {
+    MUSY_DEBUG("No stream buffer slots available or ARAM.\n\n");
+    return 0xFF;
+  }
+
+  return (unsigned char)(oSb - aramStreamBuffers);
+}
 
 size_t aramGetStreamBufferAddress(u8 id, size_t* len) {
   MUSY_ASSERT_MSG(id != 0xFF, "Stream buffer ID is invalid");
-  return 0;
+
+  if (len != NULL) {
+    *len = aramStreamBuffers[id].length;
+  }
+
+  return aramStreamBuffers[id].aram;
 }
 
 void aramFreeStreamBuffer(unsigned char id) {
-  STREAM_BUFFER* fSb;    // r30
-  STREAM_BUFFER* sb;     // r31
-  STREAM_BUFFER* lastSb; // r29
-  STREAM_BUFFER* nextSb; // r27
-  unsigned long minAddr; // r28
+  STREAM_BUFFER* fSb;
+  STREAM_BUFFER* sb;
+  STREAM_BUFFER* lastSb;
+  STREAM_BUFFER* nextSb;
+  unsigned long minAddr;
 
   MUSY_ASSERT_MSG(id != 0xFF, "Stream buffer ID is invalid");
+
+  fSb = &aramStreamBuffers[id];
+  lastSb = NULL;
+  sb = aramUsedStreamBuffers;
+
+  while (sb != NULL) {
+    if (sb == fSb) {
+      if (lastSb != NULL) {
+        lastSb->next = fSb->next;
+      } else {
+        aramUsedStreamBuffers = fSb->next;
+      }
+      break;
+    } else {
+      lastSb = sb;
+      sb = sb->next;
+    }
+  }
+
+  if (fSb->aram == aramStream) {
+    fSb->next = aramIdleStreamBuffers;
+    aramIdleStreamBuffers = fSb;
+    minAddr = -1;
+    sb = aramUsedStreamBuffers;
+    while (sb != NULL) {
+      if (sb->aram <= minAddr) {
+        minAddr = sb->aram;
+      }
+      sb = sb->next;
+    }
+
+    lastSb = NULL;
+    sb = aramFreeStreamBuffers;
+    while (sb != NULL) {
+      nextSb = sb->next;
+      if (sb->aram < minAddr) {
+        if (lastSb != NULL) {
+          lastSb->next = sb->next;
+        } else {
+          aramFreeStreamBuffers = sb->next;
+        }
+
+        sb->next = aramIdleStreamBuffers;
+        aramIdleStreamBuffers = sb;
+      }
+      sb = nextSb;
+    }
+
+    aramStream = minAddr != (unsigned long)-1 ? minAddr : aramTop;
+    return;
+  }
+
+  fSb->next = aramFreeStreamBuffers;
+  aramFreeStreamBuffers = fSb;
 }
 #endif

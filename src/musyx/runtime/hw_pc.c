@@ -35,6 +35,21 @@ pthread_mutex_t globalMutex;
 pthread_mutex_t globalInterrupt;
 #endif
 
+/* The host supplies the AI (Audio Interface) side, exactly as the Dolphin
+ * backend expects it from the SDK -- middleware layered on top of musyx may
+ * chain its own handler in front of salCallback via AIRegisterDMACallback, so
+ * the registration has to go through AI rather than being driven directly.
+ * Declared here rather than via <dolphin/ai.h> to keep musyx free of an SDK
+ * include path.
+ *
+ * AIInitDMA() is deliberately not used on PC: its address argument is a 32-bit
+ * physical address and cannot carry a host pointer. The host reads the block to
+ * play from salAiGetPlayBuffer() below instead. */
+typedef void (*AI_DMA_CALLBACK)(void);
+extern AI_DMA_CALLBACK AIRegisterDMACallback(AI_DMA_CALLBACK callback);
+extern void AIStartDMA(void);
+extern void AIStopDMA(void);
+
 u32 salGetStartDelay();
 static void callUserCallback() {
   if (salLogicActive) {
@@ -49,8 +64,6 @@ static void callUserCallback() {
 
 void salCallback() {
   salAIBufferIndex = (salAIBufferIndex + 1) % 4;
-  // AIInitDMA(OSCachedToPhysical(salAIBufferBase) + (salAIBufferIndex * DMA_BUFFER_LEN),
-  //           DMA_BUFFER_LEN);
   salLastTick = 0; // OSGetTick();
   if (salDspIsDone) {
     callUserCallback();
@@ -81,8 +94,7 @@ bool salInitAi(SND_SOME_CALLBACK callback, u32 unk, u32* outFreq) {
     salDspIsDone = TRUE;
     salLogicActive = FALSE;
     userCallback = callback;
-    // AIRegisterDMACallback(salCallback);
-    // AIInitDMA(OSCachedToPhysical(salAIBufferBase) + (salAIBufferIndex * 0x280), 0x280);
+    AIRegisterDMACallback(salCallback);
     synthInfo.numSamples = 0x20;
     *outFreq = 32000;
     MUSY_DEBUG("MusyX AI interface initialized.\n");
@@ -92,17 +104,35 @@ bool salInitAi(SND_SOME_CALLBACK callback, u32 unk, u32* outFreq) {
   return FALSE;
 }
 
-bool salStartAi() { return false; } //AIStartDMA(); }
+bool salStartAi() {
+  AIStartDMA();
+  return TRUE;
+}
 
 bool salExitAi() {
+  AIRegisterDMACallback(NULL);
+  AIStopDMA();
   salFree(salAIBufferBase);
   return TRUE;
+}
+
+/* The block the "DMA" is currently playing, for the host to hand to its audio
+ * device. salAiGetDest() below is its counterpart: where the next block is
+ * mixed. Both are slots in the same four-deep ring. */
+void* salAiGetPlayBuffer(u32* length) {
+  if (length != NULL) {
+    *length = DMA_BUFFER_LEN;
+  }
+  if (salAIBufferBase == NULL) {
+    return NULL;
+  }
+  return (void*)((u8*)salAIBufferBase + salAIBufferIndex * DMA_BUFFER_LEN);
 }
 
 void* salAiGetDest() {
   u8 index; // r31
   index = (salAIBufferIndex + 2) % 4;
-  return NULL;
+  return (void*)((u8*)salAIBufferBase + index * DMA_BUFFER_LEN);
 }
 
 bool salInitDsp(u32 arg0) { return TRUE; }

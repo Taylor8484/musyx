@@ -55,6 +55,10 @@ bool salExitDspCtrl();
 bool salExitAi();
 bool salStartAi();
 void* salAiGetDest();
+#if MUSY_TARGET == MUSY_TARGET_PC
+/* Block the host audio backend should play next; see hw_pc.c. */
+void* salAiGetPlayBuffer(u32* length);
+#endif
 
 void salInitHRTFBuffer();
 void salActivateVoice(DSPvoice* dsp_vptr, u8 studio);
