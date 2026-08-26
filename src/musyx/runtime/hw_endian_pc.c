@@ -14,9 +14,17 @@
 #include <stdint.h>
 #include <string.h>
 
-/* MusyX authoring tools emit big-endian project, pool and sample-directory
- * data, because the runtime was written for GameCube. On a little-endian host
- * every multi-byte field has to be swapped before the data is walked.
+/* The project, pool and sample-directory data this backend loads is
+ * big-endian, so on a little-endian host every multi-byte field has to be
+ * swapped before the data is walked.
+ *
+ * That is a property of the data, not of MusyX: the authoring tools do not
+ * universally emit big-endian output. Byte order is decided by the SoundTool
+ * export plugin the data was built with, and MusyX shipped on little-endian
+ * targets too. These conversions therefore belong to loading GameCube-authored
+ * data on a little-endian host -- which is what this backend does -- rather
+ * than to the PC target as such. A PC build fed little-endian data would want
+ * them skipped.
  *
  * Everything here runs exactly once per freshly loaded buffer, from
  * sndPushGroup(). That is safe because a client re-reads a group's data from
