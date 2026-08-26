@@ -1,5 +1,5 @@
 #include "musyx/platform.h"
-#if MUSYX_PLATFORM == MUSYX_DOLPHIN
+#if MUSY_TARGET == MUSY_TARGET_DOLPHIN
 #include "dolphin/PPCArch.h"
 #include "musyx/musyx.h"
 
