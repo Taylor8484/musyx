@@ -6,9 +6,11 @@
 #include "musyx/hardware.h"
 #include "musyx/sal.h"
 #include "musyx/seq.h"
+#include "musyx/stream.h"
 #include "musyx/synth.h"
 #include "musyx/synthdata.h"
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -509,11 +511,84 @@ bool sndSwapSongData(void* arrfile, u32 size) {
   return w.ok;
 }
 
+/* Per-sample ADPCM setup data. It does not live in the directory entry: the
+ * entry stores an offset from the start of the file to a block sitting behind
+ * the entry table, and hw_dspctrl.c reads the coefficients out of it when a
+ * voice starts. The block's shape follows the sample's compression type,
+ * which is the top byte of header.length (see dataGetSample).
+ *
+ *   0, 4, 5  SNDADPCMinfo         a fixed 0x28 byte header
+ *   1        DSPADPCMplusInfo     the same header, then one 6 byte record per
+ *                                 14 sample block, indexed by play position
+ *   3, ...   none                 PCM8/PCM16 carry no extra data
+ */
+static u32 SdirExtraSize(const SAMPLE_HEADER* header) {
+  u32 compType = header->length >> 24;
+  u32 length = header->length & 0x00FFFFFF;
+
+  switch (compType) {
+  case 0:
+  case 4:
+  case 5:
+    return sizeof(SNDADPCMinfo);
+
+  case 1:
+    /* hw_dspctrl.c indexes blk[] with (offset + 0xD) / 14, and an offset may
+     * be the sample's full length, so the last block is one past that. */
+    return offsetof(DSPADPCMplusInfo, blk) + (((length + 0xD) / 14) + 1) * sizeof(DSPADPCMblock);
+
+  default:
+    return 0;
+  }
+}
+
+/* Both extra-data layouts open with the same header, and every multi-byte
+ * field in it is 16 bits: numCoef, the two loop history samples, and the
+ * coefficient table. initialPS and loopPS are single bytes. */
+static void SwapAdpcmInfo(u8* p, const SAMPLE_HEADER* header) {
+  u32 i;
+  u32 blocks;
+
+  Swap16At(p + offsetof(SNDADPCMinfo, numCoef));
+  Swap16At(p + offsetof(SNDADPCMinfo, loopY0));
+  Swap16At(p + offsetof(SNDADPCMinfo, loopY1));
+  for (i = 0; i < 8; ++i) {
+    Swap16At(p + offsetof(SNDADPCMinfo, coefTab) + (i * 2 + 0) * sizeof(s16));
+    Swap16At(p + offsetof(SNDADPCMinfo, coefTab) + (i * 2 + 1) * sizeof(s16));
+  }
+
+  if ((header->length >> 24) != 1) {
+    return;
+  }
+
+  blocks = (((header->length & 0x00FFFFFF) + 0xD) / 14) + 1;
+  for (i = 0; i < blocks; ++i) {
+    u8* blk = p + offsetof(DSPADPCMplusInfo, blk) + i * sizeof(DSPADPCMblock);
+    Swap16At(blk + offsetof(DSPADPCMblock, Y0));
+    Swap16At(blk + offsetof(DSPADPCMblock, Y1));
+    /* PS and reserved are single bytes. */
+  }
+}
+
+/* The host entry table is wider than the on-disc one -- 0x28 bytes against
+ * 0x20, because `addr` becomes a real pointer -- so an extraData offset taken
+ * from the file no longer lands where dataGetSample() looks for it, which
+ * resolves it against the table it is handed. Rather than teach that arithmetic
+ * about two bases, the extra-data region is copied in behind the host table and
+ * the offsets are rewritten to match. That also gives somewhere to convert it:
+ * it is authored big-endian like everything else here, and the coefficients
+ * reach the decoder unswapped otherwise. */
 SDIR_DATA* salSdirToHost(void* sdir) {
   SDIR_DATA_INTER* in = sdir;
   SDIR_DATA* out;
+  u8* extraOut;
+  u32 tableBytes;
+  u32 discTableEnd;
+  u32 extraStart;
+  u32 extraEnd;
   u32 n;
   u32 i;
+  u32 j;
 
   if (in == NULL) {
     return NULL;
@@ -525,11 +600,49 @@ SDIR_DATA* salSdirToHost(void* sdir) {
     ;
   }
 
-  out = salMalloc((n + 1) * sizeof(SDIR_DATA));
+  tableBytes = (n + 1) * sizeof(SDIR_DATA);
+  discTableEnd = (n + 1) * sizeof(SDIR_DATA_INTER);
+
+  /* The region runs from the first extra-data block to the end of the last.
+   * It normally begins where the entry table ends, but nothing in the format
+   * promises that, so the bounds are taken from the entries themselves. */
+  extraStart = discTableEnd;
+  extraEnd = discTableEnd;
+  for (i = 0; i < n; ++i) {
+    SAMPLE_HEADER header;
+    u32 offset = Swap32(in[i].extraData);
+    u32 size;
+
+    if (offset == 0) {
+      continue;
+    }
+
+    header.info = Swap32(in[i].header.info);
+    header.length = Swap32(in[i].header.length);
+    header.loopOffset = Swap32(in[i].header.loopOffset);
+    header.loopLength = Swap32(in[i].header.loopLength);
+
+    size = SdirExtraSize(&header);
+    if (size == 0) {
+      continue;
+    }
+
+    if (offset < extraStart) {
+      extraStart = offset;
+    }
+    if (offset + size > extraEnd) {
+      extraEnd = offset + size;
+    }
+  }
+
+  out = salMalloc(tableBytes + (extraEnd - extraStart));
   MUSY_ASSERT_MSG(out != NULL, "Could not allocate host-order sample directory");
   if (out == NULL) {
     return NULL;
   }
+
+  extraOut = (u8*)out + tableBytes;
+  memcpy(extraOut, (const u8*)sdir + extraStart, extraEnd - extraStart);
 
   for (i = 0; i < n; ++i) {
     out[i].id = Swap16(in[i].id);
@@ -541,7 +654,27 @@ SDIR_DATA* salSdirToHost(void* sdir) {
     out[i].header.length = Swap32(in[i].header.length);
     out[i].header.loopOffset = Swap32(in[i].header.loopOffset);
     out[i].header.loopLength = Swap32(in[i].header.loopLength);
+
     out[i].extraData = Swap32(in[i].extraData);
+    if (out[i].extraData == 0 || SdirExtraSize(&out[i].header) == 0) {
+      out[i].extraData = 0;
+      continue;
+    }
+
+    /* Samples cut from the same source share one block, and swapping it once
+     * per entry that names it would put it back into big-endian order. */
+    for (j = 0; j < i; ++j) {
+      if (out[j].extraData != 0 && Swap32(in[j].extraData) == out[i].extraData) {
+        break;
+      }
+    }
+    if (j == i) {
+      SwapAdpcmInfo(extraOut + (out[i].extraData - extraStart), &out[i].header);
+    }
+
+    /* dataGetSample() adds this to the base of the table it is holding, so it
+     * has to be an offset into the block allocated here. */
+    out[i].extraData = tableBytes + (out[i].extraData - extraStart);
   }
 
   memset(&out[n], 0, sizeof(SDIR_DATA));
