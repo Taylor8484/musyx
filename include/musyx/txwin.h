@@ -1,6 +1,12 @@
 #ifndef _MUSYX_TXWIN
 #define _MUSYX_TXWIN
 
+#include "musyx/platform.h"
+
+/* A debug text window drawn with GX. Dolphin-only: there is no PC counterpart,
+ * and nothing outside the Dolphin backend references it. */
+#if MUSY_TARGET == MUSY_TARGET_DOLPHIN
+
 #include <dolphin/types.h>
 
 #ifdef __cplusplus
@@ -46,4 +52,5 @@ sWIN* winOpenWindow(s32 x1, s32 y1, s32 x2, s32 y2, char* caption, void* func, u
 #ifdef __cpluplus
 }
 #endif // __cpluplus
+#endif // MUSY_TARGET == MUSY_TARGET_DOLPHIN
 #endif // _MUSYX_TXWIN
