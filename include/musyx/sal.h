@@ -55,6 +55,20 @@ bool salExitDspCtrl();
 bool salExitAi();
 bool salStartAi();
 void* salAiGetDest();
+#if MUSY_TARGET == MUSY_TARGET_PC
+/* Endian fixups for big-endian authored data; see hw_endian_pc.c. Each must be
+ * applied exactly once, to a freshly loaded buffer. */
+void salSwapProjectData(void* prj);
+void salSwapPoolData(void* pool);
+SDIR_DATA* salSdirToHost(void* sdir);
+void salFreeHostSdir(SDIR_DATA* sdir);
+
+/* Software replacement for the DSP's mixing pass; see hw_mixer_pc.c. */
+void salMixFrame(s16* dest);
+
+/* Block the host audio backend should play next; see hw_pc.c. */
+void* salAiGetPlayBuffer(u32* length);
+#endif
 
 void salInitHRTFBuffer();
 void salActivateVoice(DSPvoice* dsp_vptr, u8 studio);

@@ -1026,6 +1026,15 @@ u32 synthFXStart(u16 fid,
                         fx->key | 0x80,
 #endif
                         vol, pan, 0xFF, 0xFF, 0, 0, 0xFF, fx->vGroup, 0, studio, itd);
+#if MUSY_TARGET == MUSY_TARGET_PC
+    if (v == 0xFFFFFFFF) {
+      MUSY_DEBUG("musyx: FX %u found (macro %u, prio %u, maxVoices %u) but no voice started.\n",
+                  (unsigned)fid, (unsigned)fx->macro, (unsigned)fx->priority,
+                  (unsigned)fx->maxVoices);
+    }
+  } else {
+    MUSY_DEBUG("musyx: FX %u is in no loaded effect table.\n", (unsigned)fid);
+#endif
   }
 
   return v;

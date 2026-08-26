@@ -259,6 +259,17 @@ void sndPauseVolume(u8 mute_vol, u16 time, u8 volGroup);
 SND_SEQID sndSeqPlayEx(SND_GROUPID sgid, SND_SONGID sid, void* arrfile, SND_PLAYPARA* para,
                        u8 studio);
 
+#if MUSY_TARGET == MUSY_TARGET_PC
+/* Arrangement files are authored big-endian like the rest of the sound data,
+ * but they reach the runtime through the client rather than sndPushGroup(), so
+ * the client has to convert one before handing it to sndSeqPlay(). `size` is
+ * the length of the arrangement as stored, and bounds the walk. Like the other
+ * endian fixups this must be applied exactly once per freshly loaded buffer.
+ * Returns false if the data does not walk cleanly, in which case it must not
+ * be played. */
+bool sndSwapSongData(void* arrfile, u32 size);
+#endif
+
 void sndSeqStop(SND_SEQID seqId);
 void sndSeqPause(SND_SEQID seqId);
 void sndSeqContinue(SND_SEQID seqId);

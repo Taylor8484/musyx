@@ -2,6 +2,7 @@
 #include "musyx/assert.h"
 #include "musyx/hardware.h"
 #include "musyx/s3d.h"
+#include "musyx/sal.h"
 #include "musyx/seq.h"
 #include "musyx/synth.h"
 #include "musyx/synthdata.h"
@@ -250,6 +251,18 @@ bool sndPushGroup(void* prj_data, u16 gid, void* samples, void* sdir, void* pool
   MUSY_ASSERT_MSG(sdir != NULL, "Sample directory pointer is NULL");
 
   if (sndActive && SP_CURRENT < 128) {
+#if MUSY_TARGET == MUSY_TARGET_PC
+    /* The caller hands us data straight from storage, so it is still in the
+     * big-endian layout the authoring tools emit. Fix it up before anything
+     * walks it. The sample directory also widens, so it is replaced by a
+     * host-order copy that sndPopGroup() releases. */
+    salSwapProjectData(prj_data);
+    salSwapPoolData(pool);
+    sdir = salSdirToHost(sdir);
+    if (sdir == NULL) {
+      return FALSE;
+    }
+#endif
     g = prj_data;
 
     while (g->nextOff != 0xFFFFFFFF) {
@@ -323,6 +336,9 @@ bool sndPopGroup() {
   if (g->type == 1) {
     RemoveFXTab(g->id);
   }
+#if MUSY_TARGET == MUSY_TARGET_PC
+  salFreeHostSdir(sdir);
+#endif
   return 1;
 }
 
@@ -456,6 +472,8 @@ u32 seqPlaySong(u16 sgid, u16 sid, void* arrfile, SND_PLAYPARA* para, u8 irq_cal
       }
 
       if (GS_GSI[i].gAddr->type == 0) {
+        /* On PC `arrfile` has already been converted to host order by the
+         * client's sndSwapSongData() call; see src/msm/msmmus.c. */
         g = GS_GSI[i].gAddr;
         prj = GS_GSI[i].prjAddr;
         norm = (PAGE*)((size_t)prj + g->data.song.normpageOff);

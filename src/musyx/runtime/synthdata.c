@@ -1,4 +1,6 @@
 #include "musyx/synthdata.h"
+
+#include <stdint.h>
 #include "musyx/assert.h"
 #include "musyx/hardware.h"
 #include "musyx/snd.h"
@@ -388,12 +390,19 @@ done:
 
   MUSY_ASSERT_MSG(sdir != NULL,
                   "Sample ID to be inserted could not be found in any sample directory.\n");
+  /* The assert above is compiled out in release builds, which left the misses
+   * below to fault on a NULL dereference. A group legitimately reaches here
+   * when it references a sample owned by a directory that is not currently
+   * pushed, so decline the reference rather than taking the process down. */
+  if (sdir == NULL) {
+    return 0;
+  }
 
   if (MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 1) ? (sdir->ref_cnt == 0) : TRUE) {
 #if MUSY_VERSION <= MUSY_VERSION_CHECK(2, 0, 1)
-    sdir->addr = (void*)((size_t)sdir->offset + (s32)dataSmpSDirs[i].base);
+    sdir->addr = (void*)((size_t)sdir->offset + (uintptr_t)dataSmpSDirs[i].base);
 #else
-    sdir->addr = (void*)((size_t)sdir->offset + (s32)sdirTab->base);
+    sdir->addr = (void*)((size_t)sdir->offset + (uintptr_t)sdirTab->base);
 #endif
     header = &sdir->header;
     hwSaveSample(&header, &sdir->addr
@@ -464,6 +473,10 @@ bool dataInsertFX(u16 gid, struct FX_TAB* fx, u16 fxNum) {
       }
 
       dataFXGroupNum++;
+#if MUSY_TARGET == MUSY_TARGET_PC
+      MUSY_DEBUG("musyx: effect table for group %u inserted, %u entries (%u table(s) loaded).\n",
+                  (unsigned)gid, (unsigned)fxNum, (unsigned)dataFXGroupNum);
+#endif
       hwEnableIrq();
       return TRUE;
     }
@@ -611,8 +624,11 @@ MSTEP* dataGetMacro(u16 mid) {
   if (dataMacMainTab[main].num != 0) {
     base = dataMacMainTab[main].subTabIndex;
     key.id = mid;
+    /* MAC_SUBTAB leads with a pointer, so it is 8 bytes only on a 32-bit host.
+     * The literal 8 here made the search stride half an element on 64-bit and
+     * never match -- every other sndBSearch call site uses sizeof(). */
     if ((result = (MAC_SUBTAB*)sndBSearch(&key, &dataMacSubTabmem[base], dataMacMainTab[main].num,
-                                          8, maccmp)) != NULL) {
+                                          sizeof(MAC_SUBTAB), maccmp)) != NULL) {
       return result->data;
     }
   }

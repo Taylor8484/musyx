@@ -6,6 +6,8 @@
 
 #include "musyx/musyx.h"
 #include "musyx/hardware.h"
+
+#include <stdint.h>
 #include "math.h"
 #include "float.h"
 #include "musyx/assert.h"
@@ -494,7 +496,9 @@ void hwFlushStream(void* base, u32 offset, u32 bytes, u8 hwStreamHandle, void (*
   bytes += (offset & 31);
   offset &= ~31;
   bytes = (bytes + 31) & ~31;
-  mram = (u32)base + offset;
+  /* base is a host pointer: truncating it to 32 bits leaves a source address
+   * that no longer refers to the stream buffer. */
+  mram = (uintptr_t)base + offset;
 #if MUSY_TARGET == MUSY_TARGET_DOLPHIN
   DCStoreRange((void*)mram, bytes);
 #endif
@@ -573,6 +577,23 @@ void hwSaveSample(void* header, void* data
                                      aramInfo
 #endif
   );
+#elif MUSY_TARGET == MUSY_TARGET_PC
+  /* `header` is a SAMPLE_HEADER**, and `data` points at the sample directory
+   * entry's addr field, which arrives holding a host pointer to the sample in
+   * main memory. Copy it into emulated ARAM and leave the ARAM offset behind,
+   * so everything downstream addresses samples exactly as it does on hardware
+   * -- and so the hwRemoveSample() below has a matching store to undo.
+   *
+   * Not shared with the branch above because that one reaches the header
+   * through a 32-bit cast of a pointer-to-pointer, which cannot survive on a
+   * 64-bit host. */
+  {
+    SAMPLE_HEADER* hdr = *(SAMPLE_HEADER**)header;
+    void** addr = (void**)data;
+    u32 len = convert_length(hdr->length & 0xFFFFFF, (u8)(hdr->length >> 24));
+
+    *addr = aramStoreData(*addr, len);
+  }
 #endif
 }
 

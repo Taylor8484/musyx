@@ -27,13 +27,34 @@ static SND_SOME_CALLBACK userCallback = NULL;
 
 #define DMA_BUFFER_LEN 0x280
 
+/* Guards every entry into the sound system. The host drives salCallback from
+ * its audio backend, which on PC is a separate thread from the one running
+ * game logic, so the hwDisableIrq()/hwEnableIrq() pairs that used to mask
+ * GameCube interrupts have to become a real lock. It must be recursive:
+ * those pairs nest, and snd_handle_irq() takes the same lock again through
+ * hwIRQEnterCritical(). */
 #ifdef _WIN32
-HANDLE globalMutex;
-HANDLE globalInterrupt;
+/* A CRITICAL_SECTION rather than a kernel mutex -- game code enters here far
+ * more often than the 200 Hz audio tick, and this stays in user space. */
+CRITICAL_SECTION globalMutex;
 #else
 pthread_mutex_t globalMutex;
-pthread_mutex_t globalInterrupt;
 #endif
+
+/* The host supplies the AI (Audio Interface) side, exactly as the Dolphin
+ * backend expects it from the SDK -- middleware layered on top of musyx may
+ * chain its own handler in front of salCallback via AIRegisterDMACallback, so
+ * the registration has to go through AI rather than being driven directly.
+ * Declared here rather than via <dolphin/ai.h> to keep musyx free of an SDK
+ * include path.
+ *
+ * AIInitDMA() is deliberately not used on PC: its address argument is a 32-bit
+ * physical address and cannot carry a host pointer. The host reads the block to
+ * play from salAiGetPlayBuffer() below instead. */
+typedef void (*AI_DMA_CALLBACK)(void);
+extern AI_DMA_CALLBACK AIRegisterDMACallback(AI_DMA_CALLBACK callback);
+extern void AIStartDMA(void);
+extern void AIStopDMA(void);
 
 u32 salGetStartDelay();
 static void callUserCallback() {
@@ -49,8 +70,6 @@ static void callUserCallback() {
 
 void salCallback() {
   salAIBufferIndex = (salAIBufferIndex + 1) % 4;
-  // AIInitDMA(OSCachedToPhysical(salAIBufferBase) + (salAIBufferIndex * DMA_BUFFER_LEN),
-  //           DMA_BUFFER_LEN);
   salLastTick = 0; // OSGetTick();
   if (salDspIsDone) {
     callUserCallback();
@@ -81,8 +100,7 @@ bool salInitAi(SND_SOME_CALLBACK callback, u32 unk, u32* outFreq) {
     salDspIsDone = TRUE;
     salLogicActive = FALSE;
     userCallback = callback;
-    // AIRegisterDMACallback(salCallback);
-    // AIInitDMA(OSCachedToPhysical(salAIBufferBase) + (salAIBufferIndex * 0x280), 0x280);
+    AIRegisterDMACallback(salCallback);
     synthInfo.numSamples = 0x20;
     *outFreq = 32000;
     MUSY_DEBUG("MusyX AI interface initialized.\n");
@@ -92,17 +110,35 @@ bool salInitAi(SND_SOME_CALLBACK callback, u32 unk, u32* outFreq) {
   return FALSE;
 }
 
-bool salStartAi() { return false; } //AIStartDMA(); }
+bool salStartAi() {
+  AIStartDMA();
+  return TRUE;
+}
 
 bool salExitAi() {
+  AIRegisterDMACallback(NULL);
+  AIStopDMA();
   salFree(salAIBufferBase);
   return TRUE;
+}
+
+/* The block the "DMA" is currently playing, for the host to hand to its audio
+ * device. salAiGetDest() below is its counterpart: where the next block is
+ * mixed. Both are slots in the same four-deep ring. */
+void* salAiGetPlayBuffer(u32* length) {
+  if (length != NULL) {
+    *length = DMA_BUFFER_LEN;
+  }
+  if (salAIBufferBase == NULL) {
+    return NULL;
+  }
+  return (void*)((u8*)salAIBufferBase + salAIBufferIndex * DMA_BUFFER_LEN);
 }
 
 void* salAiGetDest() {
   u8 index; // r31
   index = (salAIBufferIndex + 2) % 4;
-  return NULL;
+  return (void*)((u8*)salAIBufferBase + index * DMA_BUFFER_LEN);
 }
 
 bool salInitDsp(u32 arg0) { return TRUE; }
@@ -112,44 +148,53 @@ bool salExitDsp() { return false; }
 void salStartDsp(u16* cmdList) {}
 
 void salCtrlDsp(s16* dest) {
+  /* Updates every voice's parameter block for this frame, then -- in place of
+   * handing the resulting command list to a DSP -- mixes from those blocks in
+   * software. */
   salBuildCommandList(dest, salGetStartDelay());
-  salStartDsp(dspCmdList);
+  salMixFrame(dest);
 }
 
 u32 salGetStartDelay() { return 0; }
 
 void hwInitIrq() {
-  // oldState = OSDisableInterrupts();
-  hwIrqLevel = 1;
 #ifdef _WIN32
-  globalMutex = CreateMutex(NULL, FALSE, NULL);
-#elif defined(__linux__) && !defined(__ANDROID__)
+  InitializeCriticalSection(&globalMutex);
+#else
   pthread_mutexattr_t attr;
   pthread_mutexattr_init(&attr);
-  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ROBUST);
+  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
   pthread_mutex_init(&globalMutex, &attr);
+  pthread_mutexattr_destroy(&attr);
+#endif
+
+  /* Interrupts start masked and hwInit() releases them once it is done, so
+   * take the lock here to match that initial level of 1. */
+  hwIrqLevel = 1;
+  hwIRQEnterCritical();
+}
+
+void hwExitIrq() {
+#ifdef _WIN32
+  DeleteCriticalSection(&globalMutex);
 #else
-  // TODO
+  pthread_mutex_destroy(&globalMutex);
 #endif
 }
 
-void hwExitIrq() {}
-
 void hwEnableIrq() {
-  if (--hwIrqLevel == 0) {
-    // OSRestoreInterrupts(oldState);
-  }
+  --hwIrqLevel;
+  hwIRQLeaveCritical();
 }
 
 void hwDisableIrq() {
-  if ((hwIrqLevel++) == 0) {
-    // oldState = OSDisableInterrupts();
-  }
+  hwIRQEnterCritical();
+  ++hwIrqLevel;
 }
 
 void hwIRQEnterCritical() {
 #ifdef _WIN32
-  DWORD waitResult = WaitForSingleObject(globalMutex, INFINITE);
+  EnterCriticalSection(&globalMutex);
 #else
   pthread_mutex_lock(&globalMutex);
 #endif
@@ -157,7 +202,7 @@ void hwIRQEnterCritical() {
 
 void hwIRQLeaveCritical() {
 #ifdef _WIN32
-  ReleaseMutex(globalMutex);
+  LeaveCriticalSection(&globalMutex);
 #else
   pthread_mutex_unlock(&globalMutex);
 #endif
